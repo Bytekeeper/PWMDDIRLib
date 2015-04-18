@@ -27,12 +27,13 @@ struct PwmConfig {
 };
 
 static struct PwmConfig pwmConfig[2];
-volatile struct PwmConfig *activeConfig;
 volatile uint8_t activeConfigIndex;
 volatile uint8_t pwmIndex;
 volatile uint8_t toggleFlag;
+volatile uint8_t bufferNeedsReset;
 static uint8_t numLeds;
 static uint8_t irqCnt;
+PwmMask *currentMask;
 
 inline uint16_t toCounter(uint16_t pwm) {
     // Freq / Prescaler / PWMRange
@@ -40,30 +41,21 @@ inline uint16_t toCounter(uint16_t pwm) {
     return pwm << 1;
 }
 
-inline void resetActiveConfig() {
-        memset((void*) pwmConfig[activeConfigIndex].mask, 255, sizeof(PwmMask));
-        memset(&pwmConfig[activeConfigIndex].set, 0, sizeof(Mask));
-        pwmConfig[activeConfigIndex].mask[0].pwm = toCounter(MAXPWM);
-}
-
-inline void resetPwm() {
-    if (toggleFlag) {
-        toggleFlag = 0;
-        resetActiveConfig();
-        activeConfigIndex = 1 - activeConfigIndex;
-        activeConfig = &pwmConfig[activeConfigIndex];
+static inline void resetBuffer() {
+    if (!bufferNeedsReset) {
+        return;
     }
-
-    pwmIndex = 0;
-    PWM_SET_B(activeConfig->set.b);
-    PWM_SET_C(activeConfig->set.c);
-    PWM_SET_D(activeConfig->set.d);
-    OCR1A = activeConfig->mask[0].pwm;
-    TCNT1 = 0;
+    bufferNeedsReset = 0;
+    PwmConfig *backBuffer = &pwmConfig[1 - activeConfigIndex];
+    memset((void*) backBuffer->mask, 255, sizeof(PwmMask));
+    memset(&backBuffer->set, 0, sizeof(Mask));
+    backBuffer->mask[0].pwm = toCounter(MAXPWM);
 }
 
 Pwm::Pwm() {
 }
+
+static inline void resetPwm();
 
 void Pwm::init(uint8_t ledCount) {
     cli();
@@ -79,23 +71,24 @@ void Pwm::init(uint8_t ledCount) {
 
     toggleFlag = 0;
     activeConfigIndex = 1;
-    resetActiveConfig();
+    resetBuffer();
     activeConfigIndex = 0;
-    resetActiveConfig();
+    resetBuffer();
     resetPwm();
 
     sei();
 }
 
 void Pwm::toggle() {
+    resetBuffer();
     toggleFlag = 1;
     volatile PwmConfig *bufferedConfig = &pwmConfig[1 - activeConfigIndex];
 #ifdef DEBUG
     Serial.println("--------------------------------");
     Serial.print("Active index: ");
     Serial.print(activeConfigIndex);
-    Serial.print(", Active Config: ");
-    Serial.println((long unsigned int) activeConfig);
+//    Serial.print(", Active Config: ");
+//    Serial.println((long unsigned int) activeConfig);
     for (uint8_t i = 0; i < numLeds; i++) {
         Serial.print(i);
         Serial.print("\t| ");
@@ -117,7 +110,7 @@ bool Pwm::ready() {
 
 uint8_t determineInsertIndex(volatile PwmConfig *cfg, uint16_t pwm) {
     uint8_t i;
-    for (i = 0; i < numLeds && pwm> cfg->mask[i].pwm; i++); 
+    for (i = 0; i < numLeds && pwm > cfg->mask[i].pwm; i++); 
     if (i < numLeds) {
         if (pwm < cfg->mask[i].pwm) {
             memmove((void*) &cfg->mask[i + 1], (void*) &cfg->mask[i], sizeof(PwmMask) * (numLeds - i - 1));
@@ -127,8 +120,9 @@ uint8_t determineInsertIndex(volatile PwmConfig *cfg, uint16_t pwm) {
     return i;
 }
 
-inline bool validPwm(uint16_t pwm) {
-    return pwm && pwm < MAXPWM;
+static inline bool validPwm(uint16_t pwm) {
+    resetBuffer();
+    return pwm < MAXPWM;
 }
 
 void Pwm::pwmWriteB(uint8_t pin, uint16_t pwmPosition) {
@@ -138,7 +132,9 @@ void Pwm::pwmWriteB(uint8_t pin, uint16_t pwmPosition) {
     pwmPosition = toCounter(pwmPosition);
     uint8_t pinMask = 1 << pin;
     volatile PwmConfig *bufferedConfig = &pwmConfig[1 - activeConfigIndex];
-    bufferedConfig->set.b |= pinMask;
+    if (pwmPosition > 0) {
+        bufferedConfig->set.b |= pinMask;
+    }
     uint8_t i = determineInsertIndex(bufferedConfig, pwmPosition);
     if (i >= numLeds)
         return;
@@ -157,7 +153,9 @@ void Pwm::pwmWriteC(uint8_t pin, uint16_t pwmPosition) {
     uint8_t pinMask = 1 << pin;
     pwmPosition = toCounter(pwmPosition);
     volatile PwmConfig *bufferedConfig = &pwmConfig[1 - activeConfigIndex];
-    bufferedConfig->set.c |= pinMask;
+    if (pwmPosition > 0) {
+        bufferedConfig->set.c |= pinMask;
+    }
     uint8_t i = determineInsertIndex(bufferedConfig, pwmPosition);
     if (i >= numLeds)
         return;
@@ -176,7 +174,9 @@ void Pwm::pwmWriteD(uint8_t pin, uint16_t pwmPosition) {
     uint8_t pinMask = 1 << pin;
     pwmPosition = toCounter(pwmPosition);
     volatile PwmConfig *bufferedConfig = &pwmConfig[1 - activeConfigIndex];
-    bufferedConfig->set.d |= pinMask;
+    if (pwmPosition > 0) {
+        bufferedConfig->set.d |= pinMask;
+    }
     uint8_t i = determineInsertIndex(bufferedConfig, pwmPosition);
     if (i >= numLeds)
         return;
@@ -188,23 +188,41 @@ void Pwm::pwmWriteD(uint8_t pin, uint16_t pwmPosition) {
     }
 }
 
-inline void progressPwm() {
-    volatile PwmMask *mask = &activeConfig->mask[pwmIndex];
-    while (TCNT1 >= mask->pwm) {
-        PWM_MASK_B(mask->b);
-        PWM_MASK_C(mask->c);
-        PWM_MASK_D(mask->d);
-        pwmIndex++;
-        mask++;
+static inline void resetPwm() {
+    if (toggleFlag) {
+        toggleFlag = 0;
+        bufferNeedsReset = 1;
+        activeConfigIndex = 1 - activeConfigIndex;
     }
-    uint16_t nextPwmCounterValue = pwmIndex < numLeds ? mask->pwm : toCounter(MAXPWM);
-    OCR1A = nextPwmCounterValue;
+    PwmConfig *activeConfig = &pwmConfig[activeConfigIndex];;
+    currentMask = &activeConfig->mask[0];
+
+    pwmIndex = 0;
+    PWM_SET_B(activeConfig->set.b);
+    PWM_SET_C(activeConfig->set.c);
+    PWM_SET_D(activeConfig->set.d);
+    TCNT1 = 0;
+}
+
+
+static inline void progressPwm(uint16_t counter) {
+    while (pwmIndex < numLeds && counter >= currentMask->pwm) {
+        PWM_MASK_B(currentMask->b);
+        PWM_MASK_C(currentMask->c);
+        PWM_MASK_D(currentMask->d);
+        pwmIndex++;
+        currentMask++;
+    }
+    uint16_t nextPwmCounterValue = pwmIndex < numLeds ? currentMask->pwm : toCounter(MAXPWM);
+    OCR1A = nextPwmCounterValue > counter ? nextPwmCounterValue : counter + 1;
+    TCNT1 = counter;
 }
 
 ISR(TIMER1_COMPA_vect) {
-    if (TCNT1 >= toCounter(MAXPWM)) {
+    uint16_t counter = TCNT1;
+    if (counter >= toCounter(MAXPWM)) {
         resetPwm();
-        return;
+        counter = 0;
     }
-    progressPwm();
+    progressPwm(counter);
 }
