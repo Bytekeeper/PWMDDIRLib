@@ -31,6 +31,8 @@ volatile uint8_t toggleFlag;
 volatile uint8_t bufferNeedsReset;
 static uint8_t numLeds;
 static uint8_t irqCnt;
+PwmMask *currentMask;
+PwmBase *instance;
 
 inline uint16_t toCounter(uint16_t pwm) {
     // Freq / Prescaler / PWMRange
@@ -73,6 +75,7 @@ void PwmBase::init(uint8_t ledCount) {
     resetBuffer();
     resetPwm();
 
+    instance = this;
     sei();
 }
 
@@ -185,7 +188,7 @@ void PwmBase::pwmWriteD(uint8_t pin, uint16_t pwmPosition) {
     }
 }
 
-inline void PwmBase::resetPwm() {
+inline void resetPwm() {
     if (toggleFlag) {
         toggleFlag = 0;
         bufferNeedsReset = 1;
@@ -196,14 +199,14 @@ inline void PwmBase::resetPwm() {
 
     pwmIndex = 0;
     Mask *mask = &activeConfig->set;
-    set(mask->b, mask->c, mask->d);
+    instance->set(mask->b, mask->c, mask->d);
     TCNT1 = 0;
 }
 
 
-inline void PwmBase::progressPwm(uint16_t counter) {
+inline void progressPwm(uint16_t counter) {
     while (pwmIndex < numLeds && counter >= currentMask->pwm) {
-        mask(currentMask->b, currentMask->c, currentMask->d);
+        instance->mask(currentMask->b, currentMask->c, currentMask->d);
         pwmIndex++;
         currentMask++;
     }
@@ -212,7 +215,10 @@ inline void PwmBase::progressPwm(uint16_t counter) {
     TCNT1 = counter;
 }
 
-void PwmBase::delegateForISR() {
+ISR(TIMER1_COMPA_vect) {
+    if (!instance) {
+        return;
+    }
     uint16_t counter = TCNT1;
     if (counter >= toCounter(MAXPWM)) {
         resetPwm();
@@ -220,6 +226,3 @@ void PwmBase::delegateForISR() {
     }
     progressPwm(counter);
 }
-
-
-
