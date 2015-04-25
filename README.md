@@ -1,5 +1,10 @@
 # PWMDDIRLib
-PWM library for arduino, switching data direction instead of voltage level
+PWM library for arduino.
+
+It's actually 2 libraries in 1:
+* Switching data direction instead of voltage level
+* Normal HIGH/LOW switching of ports
+* Mixing is of those 2 modes of operation os currently not supported
 
 Note: My electronic skills are "low" - use this library with care (aka you are reponsible for the consequences, not me).
 
